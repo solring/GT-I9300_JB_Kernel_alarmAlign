@@ -110,7 +110,9 @@ static void alarm_enqueue_locked(struct alarm *alarm)
 	struct alarm *entry;
 	int leftmost = 1;
 	bool was_first = false;
-
+    
+    printk("AlignAlarm: alarm_enqueue, type %d, func %pF at %lld\n",
+		alarm->type, alarm->function, ktime_to_ns(alarm->expires));
 	pr_alarm(FLOW, "added alarm, type %d, func %pF at %lld\n",
 		alarm->type, alarm->function, ktime_to_ns(alarm->expires));
 

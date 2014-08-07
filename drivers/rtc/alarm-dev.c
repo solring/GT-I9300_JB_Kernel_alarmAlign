@@ -24,10 +24,22 @@
 #include <linux/sysdev.h>
 #include <linux/uaccess.h>
 #include <linux/wakelock.h>
+/* solring20140620: align alarm*/
+#include <linux/proc_fs.h>
 
 #define ANDROID_ALARM_PRINT_INFO (1U << 0)
 #define ANDROID_ALARM_PRINT_IO (1U << 1)
 #define ANDROID_ALARM_PRINT_INT (1U << 2)
+
+/* solring20140620: align alarm*/
+#define PROC_FNAME  "aligned-alarm"
+#define DEFAULT_PERIOD 300
+#define ALARM_DEBUG 1
+#define DEBUG_PRINT(fmt, ...) \
+            do { if (ALARM_DEBUG) printk(fmt, __VA_ARGS__); } while (0)
+
+static struct proc_dir_entry *proc_fd;
+static __kernel_time_t align_period;
 
 static int debug_mask = ANDROID_ALARM_PRINT_INFO;
 module_param_named(debug_mask, debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP);
@@ -57,6 +69,45 @@ static uint32_t wait_pending;
 
 static struct alarm alarms[ANDROID_ALARM_TYPE_COUNT];
 
+static int alarm_read_proc(char *buffer, char **buffer_location,
+	      off_t offset, int buffer_length, int *eof, void *data)
+{
+	int ret;
+	
+	printk(KERN_INFO "align alarm: proc file read (/proc/%s)\n", PROC_FNAME);
+	
+	if (offset > 0) {
+		/* we have finished to read, return 0 */
+		ret  = 0;
+	} else {
+		/* fill the buffer, return the buffer size */
+		ret = sprintf(buffer, "%ld\n", align_period);
+	}
+
+	return ret;
+}
+
+static int alarm_write_proc(struct file *file, const char __user *buffer, unsigned long count, void *data)
+{
+	char    *buf;
+    int     res;
+    
+    //printk("count=%d\n", count);
+    buf = kmalloc(count+1, GFP_KERNEL);
+    if ( copy_from_user(buf, (char*)buffer , count) ) {
+        kfree(buf);
+        return -EFAULT;
+    }
+    buf[count] = 0;
+    printk("align alarm: proc writen, string=%s\n", buf);
+    
+    res = sscanf(buf, "%ld", &align_period);
+    if(res >= 1) printk("align alarm: get new period failed.");
+    
+    kfree(buf);
+    return count;
+}
+
 static long alarm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	int rv = 0;
@@ -64,6 +115,8 @@ static long alarm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct timespec new_alarm_time;
 	struct timespec new_rtc_time;
 	struct timespec tmp_time;
+	struct timespec mycurrent;
+	struct timespec rawboott;
 	enum android_alarm_type alarm_type = ANDROID_ALARM_IOCTL_TO_TYPE(cmd);
 	uint32_t alarm_type_mask = 1U << alarm_type;
 #if defined(CONFIG_RTC_ALARM_BOOT)
@@ -71,6 +124,10 @@ static long alarm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 #elif defined(CONFIG_RTC_POWER_OFF)
 	char pwroffalarm_data[14];
 #endif
+    /* solring20140620: align alarm*/
+    
+    __kernel_time_t next_up;
+
 	if (alarm_type >= ANDROID_ALARM_TYPE_COUNT)
 		return -EINVAL;
 
@@ -121,9 +178,45 @@ static long alarm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			goto err1;
 		}
 from_old_alarm_set:
+        
+        /* solring 20130620: align all the alarms */
+        if(ALARM_DEBUG) printk("AlignAlarm: origin new_alarm_time: %ld.%09ld\n", new_alarm_time.tv_sec, new_alarm_time.tv_nsec);
+        
+        if(align_period == 0) align_period = DEFAULT_PERIOD;
+        getnstimeofday(&mycurrent);
+        //mycurrent = current_kernel_time();
+        rawboott = ktime_to_timespec(alarm_get_elapsed_realtime());
+        //getrawmonotonic(&rawboott);
+        
+
+        if(alarm_type==ANDROID_ALARM_RTC_WAKEUP){
+            printk("AlignAlarm: alarm_type: ANDROID_ALARM_RTC_WAKEUP\n");
+            next_up = mycurrent.tv_sec + align_period - (mycurrent.tv_sec % align_period);
+            printk("AlignAlarm: current time: %ld.%09ld, Next up time: %ld\n", mycurrent.tv_sec, mycurrent.tv_nsec, next_up);
+            
+            if(new_alarm_time.tv_sec > mycurrent.tv_sec && new_alarm_time.tv_sec < next_up) {
+                printk("AlignAlarm: align to next_up\n");
+                new_alarm_time.tv_sec = next_up;
+                new_alarm_time.tv_nsec = 0;
+            }
+        }else if(alarm_type==ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP){
+            printk("AlignAlarm: alarm_type: ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP\n");
+            next_up = rawboott.tv_sec + align_period - (mycurrent.tv_sec % align_period); // align to the same point as RTC
+            printk("AlignAlarm: current time: %ld.%09ld, elapsed next up time: %ld\n", rawboott.tv_sec, rawboott.tv_nsec, next_up);
+            
+            if(new_alarm_time.tv_sec > rawboott.tv_sec && new_alarm_time.tv_sec < next_up) {
+                printk("AlignAlarm: align to next_up\n");
+                new_alarm_time.tv_sec = next_up;
+                new_alarm_time.tv_nsec = 0;
+            }
+        }
+        
+        
+
 		spin_lock_irqsave(&alarm_slock, flags);
 		pr_alarm(IO, "alarm %d set %ld.%09ld\n", alarm_type,
 			new_alarm_time.tv_sec, new_alarm_time.tv_nsec);
+		//printk("--- alarm %d set %ld.%09ld ---\n", alarm_type, new_alarm_time.tv_sec, new_alarm_time.tv_nsec);
 		alarm_enabled |= alarm_type_mask;
 		alarm_start_range(&alarms[alarm_type],
 			timespec_to_ktime(new_alarm_time),
@@ -292,7 +385,25 @@ static int __init alarm_dev_init(void)
 	for (i = 0; i < ANDROID_ALARM_TYPE_COUNT; i++)
 		alarm_init(&alarms[i], i, alarm_triggered);
 	wake_lock_init(&alarm_wake_lock, WAKE_LOCK_SUSPEND, "alarm");
-
+    
+    /* solring20140620: align alarm*/
+    proc_fd = create_proc_entry(PROC_FNAME, 0, NULL);
+    if (proc_fd == NULL) {
+		remove_proc_entry(PROC_FNAME, NULL);
+		printk(KERN_ALERT "Error: Could not initialize /proc/%s\n",
+		       PROC_FNAME);
+		return -ENOMEM;
+	}
+	proc_fd->read_proc = alarm_read_proc;
+	proc_fd->write_proc = alarm_write_proc;
+	//proc_fd->mode 	 = S_IFREG | S_IRUGO;
+	//proc_fd->uid 	 = 0;
+	//proc_fd->gid 	 = 0;
+	//proc_fd->size 	 = 37;
+	printk(KERN_INFO "/proc/%s created\n", PROC_FNAME);
+	
+	align_period = DEFAULT_PERIOD;
+    
 	return 0;
 }
 
@@ -300,6 +411,8 @@ static void  __exit alarm_dev_exit(void)
 {
 	misc_deregister(&alarm_device);
 	wake_lock_destroy(&alarm_wake_lock);
+	/* solring20140620: align alarm*/
+	remove_proc_entry(PROC_FNAME, NULL);
 }
 
 module_init(alarm_dev_init);
