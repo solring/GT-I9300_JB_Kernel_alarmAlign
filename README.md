@@ -7,7 +7,7 @@ Kernel: GT-I9300_JB_Opensource_Update9
 ################################################################################
 
 
-1. How to Build
+How to Build
 
 	- get Toolchain
 		From android git server , codesourcery and etc ..
@@ -24,15 +24,21 @@ Kernel: GT-I9300_JB_Opensource_Update9
 
 
 
-2. Output files
+Output files
 
 	- Kernel : arch/arm/boot/zImage
 	- module : drivers/*/*.ko
 
 
 
-3. How to Clean	
+How to Clean	
 
 	$ make clean
 
 ################################################################################
+
+----------------------------------------------------------------------------
+
+Usage: echo [align period in second] > /proc/aligned-alarm
+
+
